@@ -1,6 +1,7 @@
 import argparse
 import numpy as np
 import cvxpy as cp
+import time
 from level import load_level
 from visualization.viz import visualize
 
@@ -58,34 +59,38 @@ v_actual   = [v0]
 alpha_log  = []
 active_log = []
 pred_trajs = []
+step_times = []
 
 print(f"MPC  fixed horizon H={H}  (N={N}, dt={dt}s, T={(N-1)*dt:.1f}s)")
-print(f"  {'k':>3}  {'horizon':>7}  {'actual err':>12}  {'status'}")
+print(f"  {'k':>3}  {'horizon':>7}  {'actual err':>12}  {'status':>10}  {'solve time':>8}")
 print("  " + "─" * 56)
 
 for k in range(N - 1):
+    t0 = time.monotonic()
+
     r_k = r_actual[k]
     v_k = v_actual[k]
 
-    horizon = min(H, N - k)
+    horizon = min(H, N - k - 1)
 
     # determine `active` fans (i.e. those that have an influence over the next `horizon` timesteps)
-    active = np.zeros((horizon - 1, N_FANS))
-    for j in range(horizon - 1):
-        r_check = r_k if j == 0 else r_pred[k + j]
-        for i, fan in enumerate(fans):
-            if fan.contains(r_check):
-                active[j, i] = 1.0
+    active = np.zeros((horizon, N_FANS))
+    r_check = np.zeros((horizon, 3))
+    r_check[0] = r_actual[k]
+    r_check[1:] = r_pred[k+1:k+horizon]
+    for i, fan in enumerate(fans):
+        active[:, i] = fan.contains(r_check).astype('float')
+    
 
     # now that we know which fans are active for each time step in this horizon, we can setup our problem
     # for the current iteration
-    r_var     = cp.Variable((horizon, 3))
-    v_var     = cp.Variable((horizon, 3))
-    alpha_var = cp.Variable((horizon - 1, N_FANS))
+    r_var     = cp.Variable((horizon + 1, 3))
+    v_var     = cp.Variable((horizon + 1, 3))
+    alpha_var = cp.Variable((horizon, N_FANS))
 
     # constraints!
     cons = [r_var[0] == r_k, v_var[0] == v_k]
-    for j in range(horizon - 1):
+    for j in range(horizon):
         wind_j = sum(active[j, i] * alpha_var[j, i] * fans[i].direction
                      for i in range(N_FANS))
         acc_j = g + wind_j
@@ -96,18 +101,17 @@ for k in range(N - 1):
             alpha_var[j] >= -ALPHA_MAX,
         ]
 
-    # objective; minimize the distance between the ball and the end goal at the end of the current trajectory
-    obj = cp.Minimize(cp.sum_squares(r_var[horizon - 1] - r_goal))
+    obj = cp.Minimize(cp.sum_squares(r_var[-1] - r_goal))
     prob = cp.Problem(obj, cons)
     prob.solve(solver=cp.CLARABEL, verbose=False)
 
     status = prob.status
     if status not in ("optimal", "optimal_inaccurate"):
-        print(f"  {k:>3}  {horizon:>7}  {'—':>13}  {'—':>12}  {status}  ← FAILED")
+        print(f"  {k:>3}  {horizon:>7}  {'—':>12}  {status:>10}  {(time.time() - t0)*1000:>8.2f}ms  ← FAILED")
         break
 
     # Update r_pred for the next H steps
-    r_pred[k:k + horizon] = r_var.value
+    r_pred[k:k+horizon+1] = r_var.value
 
     # Extract first action
     alpha_k  = alpha_var.value[0]
@@ -128,16 +132,24 @@ for k in range(N - 1):
     v_actual.append(v_next)
 
     err = float(np.linalg.norm(r_next - r_goal))
-    print(f"  {k:>3}  {horizon:>7}  {err:>12.4f}  {status}")
+    step_time = (time.monotonic() - t0) * 1000
+    step_times.append(step_time)
+    print(f"  {k:>3}  {horizon:>7}  {err:>12.4f}  {status:>10}  {step_time:>8.2f}ms")
 
 r_actual   = np.array(r_actual)
 alpha_log  = np.array(alpha_log)
 active_log = np.array(active_log)
 final_err = float(np.linalg.norm(r_actual[-1] - r_goal))
+total_time = sum(step_times)
+avg_time = np.mean(step_times)
 print(f"\nActual terminal error: {final_err:.4f} m")
+print(f"Total time: {total_time:.2f} ms, average per-step time: {avg_time:.2f} ms")
+
 
 ################################################################
 # Visualization!
 ################################################################
+'''
 visualize(fans, r_free, r_actual, alpha_log, active_log, pred_trajs,
           final_err, H, N, dt, ALPHA_MAX, r0, v0, r_goal)
+'''

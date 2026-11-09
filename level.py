@@ -16,7 +16,13 @@ class Fan:
         self.name      = name
 
     def contains(self, r):
-        return all(self.bounds[i, 0] <= r[i] <= self.bounds[i, 1] for i in range(3))
+        r = np.asarray(r)
+        if r.ndim == 1:
+            return all(self.bounds[i, 0] <= r[i] <= self.bounds[i, 1] for i in range(3))
+
+        lower_ok = (r >= self.bounds[:, 0]) 
+        upper_ok = (r <= self.bounds[:, 1])
+        return np.all(lower_ok & upper_ok, axis=-1)
 
 
 @dataclass
