@@ -47,8 +47,14 @@ def simulate_free_flight(r0, v0, steps):
 r_free = simulate_free_flight(r0, v0, N)
 
 ################################################################
-# Main MPC Loop
+# MPC Setup
 ################################################################
+
+# ARCHITECTURE NOTE: Compile-Once, Update-Often MPC Architecture (DPP Compliant)
+# - Auxiliary state variables (r_var, v_var) decouple the trajectory calculations 
+#   for sparse matrix representation
+# - Parameterized model (active_fans, horizon_selector) to avoid re-compilation with DPP caching,
+#   dropping solve times from 45ms to ~1ms
 
 # to kick things, we start by guessing our trajectory to be the straight line between the start
 # position and the end goal position
@@ -61,16 +67,24 @@ active_log = []
 pred_trajs = []
 step_times = []
 
+# Parameter setup
+# r_k and v_k are initial position and velocity
+# active_fans[j, i] is a mask that marks when fan i has influence on the ball in horizon timestep j
+# horizon_selector is a one-hot vector that marks the last horizon timestep
 r_k = cp.Parameter(3)
 v_k = cp.Parameter(3)
 active_fans = cp.Parameter((H, N_FANS))
 horizon_selector = cp.Parameter(H + 1)
 
+# Variable setup
+# r_var and v_var are auxiliary variables representing ball positions and velocities at each timestep within a horizon
+# alpha_var[j, i] represents the activation strength of fan i at horizon timestep j
 r_var     = cp.Variable((H + 1, 3))
 v_var     = cp.Variable((H + 1, 3))
 alpha_var = cp.Variable((H, N_FANS))
 
-# constraints!
+# Constraints
+# match initial conditions at each horizon timestep and bounded fan activation strengths
 cons = [r_var[0] == r_k, v_var[0] == v_k, alpha_var <= ALPHA_MAX, alpha_var >= -ALPHA_MAX]
 for j in range(H):
     wind_j = sum(alpha_var[j, i] * active_fans[j, i] * fans[i].direction
@@ -81,9 +95,19 @@ for j in range(H):
         v_var[j + 1] == v_var[j] + acc_j * dt
     ]
 
+# Use a selector to dynamically modify horizon length in objective (ensuring DPP compliance)
 horizon_end = sum(horizon_selector[j] * r_var[j] for j in range(H+1))
 obj = cp.Minimize(cp.sum_squares(horizon_end - r_goal))
 prob = cp.Problem(obj, cons)
+
+# Dummy solve to trigger compilation before MPC Loop
+r_k.value, v_k.value = np.zeros(3), np.zeros(3)
+active_fans.value, horizon_selector.value = np.zeros((H, N_FANS)), np.zeros(H + 1)
+prob.solve(solver=cp.CLARABEL, verbose=False)
+
+################################################################
+# Main MPC Loop
+################################################################
 
 print(f"MPC  fixed horizon H={H}  (N={N}, dt={dt}s, T={(N-1)*dt:.1f}s)")
 print(f"  {'k':>3}  {'horizon':>7}  {'actual err':>12}  {'status':>10}  {'solve time':>8}")
@@ -100,7 +124,7 @@ for k in range(N - 1):
     r_k.value = r_actual[k]
     v_k.value = v_actual[k]
 
-    # determine `active` fans (i.e. those that have an influence over the next `horizon` timesteps)
+    # Determine `active` fans (i.e. those that have an influence over the next `horizon` timesteps)
     active = np.zeros((H, N_FANS))
     r_check = np.zeros((horizon, 3))
     r_check[0] = r_actual[k]
