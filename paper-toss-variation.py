@@ -74,34 +74,34 @@ for k in range(N - 1):
     horizon = min(H, N - k - 1)
 
     # determine `active` fans (i.e. those that have an influence over the next `horizon` timesteps)
-    active = np.zeros((horizon, N_FANS))
+    active = np.zeros((H, N_FANS))
     r_check = np.zeros((horizon, 3))
     r_check[0] = r_actual[k]
     r_check[1:] = r_pred[k+1:k+horizon]
     for i, fan in enumerate(fans):
-        active[:, i] = fan.contains(r_check).astype('float')
+        active_horizon = np.zeros((H, ))
+        active_horizon[:horizon] = fan.contains(r_check).astype('float')
+        active[:, i] = active_horizon
     
 
     # now that we know which fans are active for each time step in this horizon, we can setup our problem
     # for the current iteration
-    r_var     = cp.Variable((horizon + 1, 3))
-    v_var     = cp.Variable((horizon + 1, 3))
-    alpha_var = cp.Variable((horizon, N_FANS))
+    r_var     = cp.Variable((H + 1, 3))
+    v_var     = cp.Variable((H + 1, 3))
+    alpha_var = cp.Variable((H, N_FANS))
 
     # constraints!
-    cons = [r_var[0] == r_k, v_var[0] == v_k]
-    for j in range(horizon):
+    cons = [r_var[0] == r_k, v_var[0] == v_k, alpha_var <= ALPHA_MAX, alpha_var >= -ALPHA_MAX]
+    for j in range(H):
         wind_j = sum(active[j, i] * alpha_var[j, i] * fans[i].direction
                      for i in range(N_FANS))
         acc_j = g + wind_j
         cons += [
             r_var[j + 1] == r_var[j] + v_var[j] * dt + 0.5 * acc_j * dt ** 2,
             v_var[j + 1] == v_var[j] + acc_j * dt,
-            alpha_var[j] <=  ALPHA_MAX,
-            alpha_var[j] >= -ALPHA_MAX,
         ]
 
-    obj = cp.Minimize(cp.sum_squares(r_var[-1] - r_goal))
+    obj = cp.Minimize(cp.sum_squares(r_var[horizon] - r_goal))
     prob = cp.Problem(obj, cons)
     prob.solve(solver=cp.CLARABEL, verbose=False)
 
@@ -109,9 +109,12 @@ for k in range(N - 1):
     if status not in ("optimal", "optimal_inaccurate"):
         print(f"  {k:>3}  {horizon:>7}  {'—':>12}  {status:>10}  {(time.time() - t0)*1000:>8.2f}ms  ← FAILED")
         break
+    assert r_var.value is not None
+    assert alpha_var.value is not None
 
-    # Update r_pred for the next H steps
-    r_pred[k:k+horizon+1] = r_var.value
+    # Update r_pred using the steps in the computed horizon
+    horizon_preds = r_var.value[:horizon+1]
+    r_pred[k:k+horizon+1] = horizon_preds
 
     # Extract first action
     alpha_k  = alpha_var.value[0]
@@ -119,7 +122,7 @@ for k in range(N - 1):
 
     alpha_log.append(alpha_k)
     active_log.append(active_k)
-    pred_trajs.append(r_var.value)
+    pred_trajs.append(horizon_preds)
 
     # Simulate one true step
     wind_true = sum(active_k[i] * alpha_k[i] * fans[i].direction
