@@ -1,6 +1,6 @@
 [params]
 N         = 21
-H         = 10
+H         = 11
 dt        = 0.15
 alpha_max = 80.0
 
