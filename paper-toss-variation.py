@@ -101,9 +101,14 @@ obj = cp.Minimize(cp.sum_squares(horizon_end - r_goal))
 prob = cp.Problem(obj, cons)
 
 # Dummy solve to trigger compilation before MPC Loop
+t0 = time.monotonic()
+
 r_k.value, v_k.value = np.zeros(3), np.zeros(3)
 active_fans.value, horizon_selector.value = np.zeros((H, N_FANS)), np.zeros(H + 1)
 prob.solve(solver=cp.CLARABEL, verbose=False)
+
+step_time = (time.monotonic() - t0) * 1000
+print(f"Dummy solve time: {step_time:.2f} ms")
 
 ################################################################
 # Main MPC Loop
@@ -126,11 +131,9 @@ for k in range(N - 1):
 
     # Determine `active` fans (i.e. those that have an influence over the next `horizon` timesteps)
     active = np.zeros((H, N_FANS))
-    r_check = np.zeros((horizon, 3))
-    r_check[0] = r_actual[k]
-    r_check[1:] = r_pred[k+1:k+horizon]
+    r_check = r_pred[k:k+horizon]
     for i, fan in enumerate(fans):
-        active_horizon = np.zeros((H, ))
+        active_horizon = np.zeros((H,))
         active_horizon[:horizon] = fan.contains(r_check).astype('float')
         active[:, i] = active_horizon
 
@@ -143,6 +146,7 @@ for k in range(N - 1):
         print(f"  {k:>3}  {horizon:>7}  {'—':>12}  {status:>10}  {(time.time() - t0)*1000:>8.2f}ms  ← FAILED")
         break
     assert r_var.value is not None
+    assert v_var.value is not None
     assert alpha_var.value is not None
 
     # Update r_pred using the steps in the computed horizon
@@ -157,12 +161,9 @@ for k in range(N - 1):
     active_log.append(active_k)
     pred_trajs.append(horizon_preds)
 
-    # Simulate one true step
-    wind_true = sum(active_k[i] * alpha_k[i] * fans[i].direction
-                    for i in range(N_FANS))
-    acc_true = g + wind_true
-    r_next = r_k.value + v_k.value * dt + 0.5 * acc_true * dt ** 2
-    v_next = v_k.value + acc_true * dt
+    # Update actual state with result of first action
+    r_next = r_var.value[1]
+    v_next = v_var.value[1]
 
     r_actual.append(r_next)
     v_actual.append(v_next)
@@ -185,7 +186,6 @@ print(f"Total time: {total_time:.2f} ms, average per-step time: {avg_time:.2f} m
 ################################################################
 # Visualization!
 ################################################################
-'''
+
 visualize(fans, r_free, r_actual, alpha_log, active_log, pred_trajs,
           final_err, H, N, dt, ALPHA_MAX, r0, v0, r_goal)
-'''
